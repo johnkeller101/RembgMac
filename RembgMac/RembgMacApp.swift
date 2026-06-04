@@ -94,7 +94,7 @@ struct MenuContent: View {
         }())
 
         Button("Open Web UI") {
-            NSWorkspace.shared.open(URL(string: "http://localhost:7001")!)
+            NSWorkspace.shared.open(URL(string: "http://localhost:7100")!)
         }
         .disabled({
             if case .running = appState.status { return false }

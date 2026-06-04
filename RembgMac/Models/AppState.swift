@@ -24,7 +24,7 @@ final class AppState: ObservableObject {
     let processManager: RembgProcessManager
     let venvManager: VenvManager
     let healthChecker: HealthChecker
-    let proxyServer: ProxyServer
+    let statusServer: StatusServer
 
     private let maxLogLines = 500
     private var requestCountWriteBuffer = 0
@@ -53,7 +53,7 @@ final class AppState: ObservableObject {
 
     var statusText: String {
         switch status {
-        case .running: return "rembg running on :7100"
+        case .running: return "rembg running on :7100 (status :7101)"
         case .starting: return "Starting rembg..."
         case .downloadingModel: return "Downloading model..."
         case .settingUp(let msg): return msg.isEmpty ? "Setting up..." : msg
@@ -82,7 +82,7 @@ final class AppState: ObservableObject {
         self.venvManager = VenvManager(appSupportDir: appSupport)
         self.processManager = RembgProcessManager(appSupportDir: appSupport)
         self.healthChecker = HealthChecker()
-        self.proxyServer = ProxyServer()
+        self.statusServer = StatusServer()
 
         self.venvExists = venvManager.venvExists
 
@@ -125,21 +125,13 @@ final class AppState: ObservableObject {
             }
         }
 
-        proxyServer.getStatus = { [weak self] in
+        statusServer.getStatus = { [weak self] in
             self?.status ?? .stopped
         }
-        proxyServer.getRequestCount = { [weak self] in
+        statusServer.getRequestCount = { [weak self] in
             self?.requestCount ?? 0
         }
-        proxyServer.onRequestCompleted = { [weak self] in
-            Task { @MainActor in
-                self?.requestCount += 1
-            }
-        }
-        proxyServer.rembgPid = { [weak self] in
-            self?.processManager.currentPid
-        }
-        proxyServer.onLog = { [weak self] line in
+        statusServer.onLog = { [weak self] line in
             Task { @MainActor in
                 self?.appendLog(line)
             }
@@ -158,7 +150,7 @@ final class AppState: ObservableObject {
         guard venvExists else { return }
         status = .starting
         startTime = nil
-        proxyServer.start()
+        statusServer.start()
         processManager.start()
         healthChecker.startChecking { [weak self] healthy in
             Task { @MainActor in
@@ -181,7 +173,7 @@ final class AppState: ObservableObject {
     func stopServer() {
         healthChecker.stop()
         processManager.stop()
-        proxyServer.stop()
+        statusServer.stop()
         status = .stopped
         startTime = nil
     }

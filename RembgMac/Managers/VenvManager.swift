@@ -65,7 +65,58 @@ final class VenvManager {
             "-c", "import rembg; print('rembg', rembg.__version__, 'OK')"
         ])
 
+        // Write the server wrapper script that patches ONNX memory arena
+        writeServerScript()
+
         progress("Setup complete")
+    }
+
+    /// Writes rembg_server.py to the app support directory.
+    /// This wrapper patches ONNX Runtime to disable CPU memory arena (fixes rembg#752).
+    func writeServerScript() {
+        let script = """
+        \"\"\"
+        rembg server wrapper — disables ONNX Runtime CPU memory arena.
+        Fixes: https://github.com/danielgatis/rembg/issues/752
+        \"\"\"
+        import onnxruntime as ort
+
+        _orig_init = ort.InferenceSession.__init__
+
+        def _patched_init(self, *args, **kwargs):
+            opts = ort.SessionOptions()
+            opts.enable_cpu_mem_arena = False
+            opts.enable_mem_pattern = False
+
+            if len(args) > 1 and args[1] is not None:
+                args[1].enable_cpu_mem_arena = False
+                args[1].enable_mem_pattern = False
+            elif "sess_options" in kwargs and kwargs["sess_options"] is not None:
+                kwargs["sess_options"].enable_cpu_mem_arena = False
+                kwargs["sess_options"].enable_mem_pattern = False
+            else:
+                kwargs["sess_options"] = opts
+
+            _orig_init(self, *args, **kwargs)
+
+        ort.InferenceSession.__init__ = _patched_init
+
+        import sys
+        sys.argv = ["rembg", "s", "--host", "0.0.0.0", "--port", "7100", "--log_level", "info"]
+        from rembg.cli import main
+        main()
+        """
+
+        let scriptPath = appSupportDir.appendingPathComponent("rembg_server.py")
+        try? script.write(to: scriptPath, atomically: true, encoding: .utf8)
+    }
+
+    var serverScriptPath: URL {
+        appSupportDir.appendingPathComponent("rembg_server.py")
+    }
+
+    var serverScriptExists: Bool {
+        FileManager.default.fileExists(atPath: serverScriptPath.path)
     }
 
     /// Upgrades rembg to the latest version.

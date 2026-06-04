@@ -114,14 +114,17 @@ final class RembgProcessManager: @unchecked Sendable {
         }
     }
 
-    /// Decide how to invoke rembg. Prefer the venv bin script if it exists.
+    /// Decide how to invoke rembg. Prefer the wrapper script (patches ONNX memory arena).
     private func buildCommand() -> (String, [String]) {
-        // Check if the rembg binary exists in the venv (installed via [cli] extra)
-        if FileManager.default.fileExists(atPath: rembgBinPath) {
-            return (rembgBinPath, ["s", "--host", "127.0.0.1", "--port", "7001", "--log_level", "info"])
+        let serverScript = appSupportDir.appendingPathComponent("rembg_server.py").path
+        if FileManager.default.fileExists(atPath: serverScript) {
+            return (pythonPath, [serverScript])
         }
-        // Fall back to python -m
-        return (pythonPath, ["-m", "rembg.cli", "s", "--host", "127.0.0.1", "--port", "7001", "--log_level", "info"])
+        // Fallback: direct rembg binary (no memory fix)
+        if FileManager.default.fileExists(atPath: rembgBinPath) {
+            return (rembgBinPath, ["s", "--host", "0.0.0.0", "--port", "7100", "--log_level", "info"])
+        }
+        return (pythonPath, ["-m", "rembg.cli", "s", "--host", "0.0.0.0", "--port", "7100", "--log_level", "info"])
     }
 
     // MARK: - Process lifecycle
