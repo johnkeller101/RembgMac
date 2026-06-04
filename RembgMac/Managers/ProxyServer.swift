@@ -215,9 +215,13 @@ final class ProxyServer: @unchecked Sendable {
             requestLock.unlock()
         }
 
+        // Track whether we incremented the counter (for cleanup on all exit paths)
+        let isTrackedRequest = path.hasPrefix("/api/remove")
+
         // Forward to rembg
         let rembgSocket = socket(AF_INET, SOCK_STREAM, 0)
         guard rembgSocket >= 0 else {
+            if isTrackedRequest { decrementActiveRequests() }
             sendError(clientSocket, code: 502, message: "Failed to connect to rembg")
             return
         }
@@ -235,6 +239,7 @@ final class ProxyServer: @unchecked Sendable {
         }
 
         guard connectResult == 0 else {
+            if isTrackedRequest { decrementActiveRequests() }
             sendError(clientSocket, code: 502, message: "rembg not reachable")
             return
         }
@@ -285,11 +290,8 @@ final class ProxyServer: @unchecked Sendable {
         }
 
         // Track completion for /api/remove requests
-        if path.hasPrefix("/api/remove") {
-            requestLock.lock()
-            activeRequests -= 1
-            requestLock.unlock()
-
+        if isTrackedRequest {
+            decrementActiveRequests()
             if totalResponse > 0 {
                 onRequestCompleted?()
             }
@@ -309,6 +311,12 @@ final class ProxyServer: @unchecked Sendable {
 
     // Removed killProcessOnPort — SO_REUSEADDR handles port reuse,
     // and lsof can hang on macOS causing the proxy to never start.
+
+    private func decrementActiveRequests() {
+        requestLock.lock()
+        activeRequests -= 1
+        requestLock.unlock()
+    }
 
     private func sendError(_ socket: Int32, code: Int, message: String) {
         let json = "{\"error\":\"\(message)\"}"
