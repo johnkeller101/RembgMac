@@ -28,6 +28,7 @@ final class RembgProcessManager: @unchecked Sendable {
     }
 
     var isRunning: Bool { process?.isRunning ?? false }
+    var currentPid: Int32? { process?.isRunning == true ? process?.processIdentifier : nil }
 
     init(appSupportDir: URL) {
         self.appSupportDir = appSupportDir

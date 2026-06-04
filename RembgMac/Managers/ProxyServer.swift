@@ -299,13 +299,17 @@ final class ProxyServer: @unchecked Sendable {
     // Removed killProcessOnPort — SO_REUSEADDR handles port reuse,
     // and lsof can hang on macOS causing the proxy to never start.
 
-    /// Count active TCP connections to rembg by checking established connections to port 7001.
-    /// This is the ground truth — no counters to leak.
+    /// Check if rembg Python process is actively processing by checking its CPU usage.
+    /// Returns the number of active threads consuming CPU (>10% = busy processing an image).
+    var rembgPid: (() -> Int32?)?
+
     private func countActiveRembgConnections() -> Int {
-        // Use netstat to count ESTABLISHED connections to port 7001
+        guard let pid = rembgPid?() else { return 0 }
+
+        // ps -o %cpu= -p <pid> returns CPU percentage
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/sbin/netstat")
-        p.arguments = ["-an"]
+        p.executableURL = URL(fileURLWithPath: "/bin/ps")
+        p.arguments = ["-o", "%cpu=", "-p", "\(pid)"]
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = FileHandle.nullDevice
@@ -313,14 +317,13 @@ final class ProxyServer: @unchecked Sendable {
             try p.run()
             p.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            guard let output = String(data: data, encoding: .utf8) else { return 0 }
-            // Count lines with our rembg port in ESTABLISHED state
-            let port = ".\(rembgPort)"
-            return output.components(separatedBy: "\n")
-                .filter { line in
-                    line.contains(port) && line.contains("ESTABLISHED")
-                }
-                .count
+            guard let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  let cpu = Double(output) else { return 0 }
+            // If CPU > 10%, rembg is actively processing at least one image
+            // If CPU > 150%, likely processing multiple (multi-threaded ONNX)
+            if cpu > 150 { return 2 }
+            if cpu > 10 { return 1 }
+            return 0
         } catch {
             return 0
         }

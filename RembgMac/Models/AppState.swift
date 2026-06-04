@@ -136,6 +136,9 @@ final class AppState: ObservableObject {
                 self?.requestCount += 1
             }
         }
+        proxyServer.rembgPid = { [weak self] in
+            self?.processManager.currentPid
+        }
         proxyServer.onLog = { [weak self] line in
             Task { @MainActor in
                 self?.appendLog(line)
