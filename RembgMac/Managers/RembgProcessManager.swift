@@ -67,9 +67,16 @@ final class RembgProcessManager: @unchecked Sendable {
     private func launchProcess() {
         killProcess()
 
+        // First, log diagnostic info about the rembg installation
+        logDiagnostics()
+
+        let args = ["-m", "rembg.cli", "s", "--host", "127.0.0.1", "--port", "7001", "--log_level", "info"]
+        onLog?("[launch] Command: \(pythonPath) \(args.joined(separator: " "))")
+        onLog?("[launch] Python exists: \(FileManager.default.fileExists(atPath: pythonPath))")
+
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pythonPath)
-        proc.arguments = ["-m", "rembg.cli", "s", "--host", "127.0.0.1", "--port", "7001", "--log_level", "info"]
+        proc.arguments = args
         proc.environment = ProcessInfo.processInfo.environment
 
         let pipe = Pipe()
@@ -88,7 +95,7 @@ final class RembgProcessManager: @unchecked Sendable {
 
         proc.terminationHandler = { [weak self] proc in
             guard let self, !self.intentionalStop else { return }
-            self.onLog?("Process exited with code \(proc.terminationStatus)")
+            self.onLog?("Process exited with code \(proc.terminationStatus) (reason: \(proc.terminationReason == .exit ? "normal exit" : "uncaught signal"))")
             self.onStatusChange?(.stopped)
             self.scheduleRestart()
         }
@@ -146,6 +153,43 @@ final class RembgProcessManager: @unchecked Sendable {
             }
         }
         try? FileManager.default.removeItem(atPath: pidFilePath)
+    }
+
+    /// Run diagnostic commands to understand the rembg installation state.
+    private func logDiagnostics() {
+        // Check rembg version and available subcommands
+        let commands: [(String, [String])] = [
+            ("rembg --help", ["-m", "rembg.cli", "--help"]),
+            ("pip list (rembg/onnx)", ["-m", "pip", "list"]),
+            ("python version", ["--version"]),
+        ]
+
+        for (label, args) in commands {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: pythonPath)
+            p.arguments = args
+            let pipe = Pipe()
+            p.standardOutput = pipe
+            p.standardError = pipe
+            do {
+                try p.run()
+                p.waitUntilExit()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                var output = String(data: data, encoding: .utf8) ?? "(no output)"
+                // For pip list, filter to relevant packages
+                if label.contains("pip") {
+                    let relevant = output.components(separatedBy: "\n")
+                        .filter { line in
+                            let l = line.lowercased()
+                            return l.contains("rembg") || l.contains("onnx") || l.contains("uvicorn") || l.contains("fastapi")
+                        }
+                    output = relevant.isEmpty ? "(no rembg/onnx packages found)" : relevant.joined(separator: "\n")
+                }
+                onLog?("[diag] \(label) (exit \(p.terminationStatus)):\n\(output.trimmingCharacters(in: .whitespacesAndNewlines))")
+            } catch {
+                onLog?("[diag] \(label): FAILED — \(error.localizedDescription)")
+            }
+        }
     }
 
     private func handleLogLine(_ line: String) {
