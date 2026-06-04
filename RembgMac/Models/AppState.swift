@@ -96,6 +96,13 @@ final class AppState: ObservableObject {
                 self?.requestCount += 1
             }
         }
+
+        // Auto-start server if venv is ready
+        if venvExists {
+            Task { @MainActor [weak self] in
+                self?.startServer()
+            }
+        }
     }
 
     func startServer() {
