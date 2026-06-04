@@ -9,6 +9,8 @@ final class RembgProcessManager: @unchecked Sendable {
     private var intentionalStop = false
     private let maxBackoff: TimeInterval = 60
     private let launchQueue = DispatchQueue(label: "com.rembgmac.process")
+    private var idleTimer: DispatchWorkItem?
+    private let idleTimeout: TimeInterval = 120 // 2 minutes
 
     var onLog: ((String) -> Void)?
     var onStatusChange: ((ServerStatus) -> Void)?
@@ -47,6 +49,7 @@ final class RembgProcessManager: @unchecked Sendable {
 
     func stop() {
         intentionalStop = true
+        cancelIdleTimer()
         forceKillProcess()
         onStatusChange?(.stopped)
     }
@@ -106,6 +109,7 @@ final class RembgProcessManager: @unchecked Sendable {
             self.lastStableStart = Date()
             writePidFile(proc.processIdentifier)
             onStatusChange?(.starting)
+            startIdleTimer()
             log("Started rembg server (PID \(proc.processIdentifier))")
         } catch {
             log("[launch] Failed to start: \(error.localizedDescription)")
@@ -260,14 +264,46 @@ final class RembgProcessManager: @unchecked Sendable {
             onDependencyError?()
         }
 
-        // Count successful requests
-        if lower.contains("post") && lower.contains("/api/remove") && lower.contains("200") {
-            onRequestCounted?()
+        // Count successful requests and reset idle timer
+        if lower.contains("post") && lower.contains("/api/remove") {
+            resetIdleTimer()
+            if lower.contains("200") {
+                onRequestCounted?()
+            }
         }
     }
 
     private func log(_ message: String) {
         onLog?(message)
+    }
+
+    // MARK: - Idle shutdown (reclaim memory after 2 min of no requests)
+
+    private func resetIdleTimer() {
+        idleTimer?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isRunning, !self.intentionalStop else { return }
+            self.log("[idle] No requests for \(Int(self.idleTimeout))s — shutting down rembg to free memory")
+            self.forceKillProcess()
+            self.onStatusChange?(.stopped)
+            // Auto-restart after a brief pause — rembg will be ready for the next request
+            self.launchQueue.asyncAfter(deadline: .now() + 2) { [weak self] in
+                guard let self, !self.intentionalStop else { return }
+                self.log("[idle] Restarting rembg (clean memory state)")
+                self.cleanupAndLaunch()
+            }
+        }
+        idleTimer = work
+        launchQueue.asyncAfter(deadline: .now() + idleTimeout, execute: work)
+    }
+
+    private func startIdleTimer() {
+        resetIdleTimer()
+    }
+
+    private func cancelIdleTimer() {
+        idleTimer?.cancel()
+        idleTimer = nil
     }
 
     // MARK: - Restart
