@@ -21,3 +21,5 @@ xcuserdata/
 # Swift Package Manager
 .build/
 Package.resolved
+RembgMac.zip
+build/
