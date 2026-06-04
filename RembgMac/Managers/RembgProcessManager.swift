@@ -18,10 +18,18 @@ final class RembgProcessManager: @unchecked Sendable {
         appSupportDir.appendingPathComponent("venv/bin/python3").path
     }
 
+    private var pidFilePath: String {
+        appSupportDir.appendingPathComponent("rembg.pid").path
+    }
+
     var isRunning: Bool { process?.isRunning ?? false }
 
     init(appSupportDir: URL) {
         self.appSupportDir = appSupportDir
+        // Kill any stale process from a previous app session (off main thread)
+        DispatchQueue.global().async { [weak self] in
+            self?.killStalePidFile()
+        }
     }
 
     deinit {
@@ -30,12 +38,29 @@ final class RembgProcessManager: @unchecked Sendable {
 
     func start() {
         intentionalStop = false
-        launchProcess()
+        DispatchQueue.global().async { [weak self] in
+            self?.launchProcess()
+        }
     }
 
     func stop() {
         intentionalStop = true
-        killProcess()
+        // Kill synchronously but quickly — terminate sends SIGTERM immediately
+        if let proc = process, proc.isRunning {
+            proc.terminate()
+        }
+        outputPipe?.fileHandleForReading.readabilityHandler = nil
+        // Clean up PID file and force-kill in background if needed
+        let pid = process?.processIdentifier
+        process = nil
+        outputPipe = nil
+        try? FileManager.default.removeItem(atPath: pidFilePath)
+        if let pid {
+            DispatchQueue.global().async {
+                usleep(500_000)
+                kill(pid, SIGKILL) // Ensure it's dead
+            }
+        }
         onStatusChange?(.stopped)
     }
 
@@ -73,6 +98,8 @@ final class RembgProcessManager: @unchecked Sendable {
             self.process = proc
             self.outputPipe = pipe
             self.lastStartTime = Date()
+            // Write PID so we can clean up stale processes on next launch
+            try? String(proc.processIdentifier).write(toFile: pidFilePath, atomically: true, encoding: .utf8)
             onStatusChange?(.starting)
             onLog?("Started rembg server (PID \(proc.processIdentifier))")
         } catch {
@@ -84,17 +111,41 @@ final class RembgProcessManager: @unchecked Sendable {
 
     private func killProcess() {
         if let proc = process, proc.isRunning {
+            let pid = proc.processIdentifier
             proc.terminate()
-            // Give it 3 seconds, then force kill
-            DispatchQueue.global().asyncAfter(deadline: .now() + 3) { [weak proc] in
-                if let p = proc, p.isRunning {
-                    kill(p.processIdentifier, SIGKILL)
-                }
+            // Wait up to 2 seconds for graceful exit
+            for _ in 0..<20 {
+                if !proc.isRunning { break }
+                usleep(100_000)
+            }
+            // Force kill if still alive
+            if proc.isRunning {
+                kill(pid, SIGKILL)
+                proc.waitUntilExit()
             }
         }
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         process = nil
         outputPipe = nil
+        try? FileManager.default.removeItem(atPath: pidFilePath)
+    }
+
+    /// On app launch, kill any rembg process left over from a previous session.
+    private func killStalePidFile() {
+        guard let pidStr = try? String(contentsOfFile: pidFilePath, encoding: .utf8),
+              let pid = Int32(pidStr.trimmingCharacters(in: .whitespacesAndNewlines)),
+              pid > 0 else { return }
+
+        // Check if this PID is actually a python/rembg process (not some unrelated process that reused the PID)
+        if kill(pid, 0) == 0 {
+            onLog?("Killing stale rembg process from previous session (PID \(pid))")
+            kill(pid, SIGTERM)
+            usleep(500_000)
+            if kill(pid, 0) == 0 {
+                kill(pid, SIGKILL)
+            }
+        }
+        try? FileManager.default.removeItem(atPath: pidFilePath)
     }
 
     private func handleLogLine(_ line: String) {
