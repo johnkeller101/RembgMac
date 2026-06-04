@@ -27,13 +27,14 @@ struct RembgMacApp: App {
             LogWindowView(appState: appState)
         }
         .defaultSize(width: 700, height: 400)
+        .defaultPosition(.center)
     }
 }
 
 struct MenuContent: View {
     @ObservedObject var appState: AppState
     @AppStorage("launchAtLogin") private var launchAtLogin = true
-    @Environment(\.openWindow) var openWindow
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Text(appState.statusText)
@@ -88,7 +89,14 @@ struct MenuContent: View {
         }())
 
         Button("View Logs") {
-            openWindow(id: "log-window")
+            // openWindow doesn't reliably work in menu-style MenuBarExtra,
+            // so we find or create the window via AppKit directly
+            if let window = NSApp.windows.first(where: { $0.title == "rembg Logs" }) {
+                window.makeKeyAndOrderFront(nil)
+            } else {
+                openWindow(id: "log-window")
+            }
+            NSApp.activate(ignoringOtherApps: true)
         }
 
         Toggle("Launch at Login", isOn: $launchAtLogin)
