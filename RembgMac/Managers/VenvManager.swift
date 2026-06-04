@@ -50,20 +50,19 @@ final class VenvManager {
         progress("Creating virtual environment...")
         try await runProcess(executable: systemPython, arguments: ["-m", "venv", venvDir.path])
 
-        // Install rembg with CPU and CLI extras
-        let pipPath = appSupportDir.appendingPathComponent("venv/bin/pip").path
+        // Use python3 -m pip (not the pip binary) to avoid path mismatch issues
         progress("Upgrading pip...")
-        try await runProcess(executable: URL(fileURLWithPath: pipPath), arguments: [
-            "install", "--upgrade", "pip"
+        try await runProcess(executable: pythonPath, arguments: [
+            "-m", "pip", "install", "--upgrade", "pip"
         ])
         progress("Installing rembg (this may take a few minutes)...")
-        try await runProcess(executable: URL(fileURLWithPath: pipPath), arguments: [
-            "install", "--force-reinstall", "rembg[cpu,cli]"
+        try await runProcess(executable: pythonPath, arguments: [
+            "-m", "pip", "install", "--force-reinstall", "rembg[cpu,cli]"
         ])
-        // Verify installation
-        let pythonInVenv = appSupportDir.appendingPathComponent("venv/bin/python3").path
-        try await runProcess(executable: URL(fileURLWithPath: pythonInVenv), arguments: [
-            "-c", "import rembg; print(rembg.__version__)"
+        // Verify the module is actually importable
+        progress("Verifying installation...")
+        try await runProcess(executable: pythonPath, arguments: [
+            "-c", "import rembg; print('rembg', rembg.__version__, 'OK')"
         ])
 
         progress("Setup complete")
@@ -73,10 +72,9 @@ final class VenvManager {
     func upgradeRembg(progress: @escaping (String) -> Void) async throws {
         guard venvExists else { throw VenvError.noVenv }
 
-        let pipPath = appSupportDir.appendingPathComponent("venv/bin/pip").path
         progress("Upgrading rembg...")
-        try await runProcess(executable: URL(fileURLWithPath: pipPath), arguments: [
-            "install", "--upgrade", "--force-reinstall", "rembg[cpu,cli]"
+        try await runProcess(executable: pythonPath, arguments: [
+            "-m", "pip", "install", "--upgrade", "--force-reinstall", "rembg[cpu,cli]"
         ])
 
         progress("Upgrade complete")
