@@ -17,6 +17,7 @@ final class ProxyServer: @unchecked Sendable {
 
     func start() {
         stop()
+        killProcessOnPort(listenPort)
 
         serverSocket = socket(AF_INET, SOCK_STREAM, 0)
         guard serverSocket >= 0 else {
@@ -261,6 +262,31 @@ final class ProxyServer: @unchecked Sendable {
             }
         }
         return 0
+    }
+
+    /// Kill any stale process holding our listen port (e.g., old rembg from a previous version).
+    private func killProcessOnPort(_ port: UInt16) {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/lsof")
+        proc.arguments = ["-ti", ":\(port)"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+        proc.waitUntilExit()
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !output.isEmpty else { return }
+
+        for pidStr in output.components(separatedBy: "\n") {
+            if let pid = Int32(pidStr.trimmingCharacters(in: .whitespaces)), pid != getpid() {
+                onLog?("[proxy] Killing stale process \(pid) on port \(port)")
+                kill(pid, SIGTERM)
+            }
+        }
+        // Brief pause to let the port release
+        usleep(500_000)
     }
 
     private func sendError(_ socket: Int32, code: Int, message: String) {
