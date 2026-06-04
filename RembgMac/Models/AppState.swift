@@ -149,14 +149,6 @@ final class AppState: ObservableObject {
             }
         }
 
-        // Ensure child processes are killed when the app terminates (including force-quit)
-        NotificationCenter.default.addObserver(
-            forName: NSApplication.willTerminateNotification,
-            object: nil, queue: .main
-        ) { [weak self] _ in
-            self?.processManager.stop()
-            self?.proxyServer.stop()
-        }
     }
 
     func startServer() {
