@@ -9,9 +9,7 @@ final class ProxyServer: @unchecked Sendable {
     private var serverSocket: Int32 = -1
     private var isListening = false
     private let queue = DispatchQueue(label: "com.rembgmac.proxy", attributes: .concurrent)
-    private var activeRequests = 0
-    private let maxConcurrentRequests = 2
-    private let requestLock = NSLock()
+    private let maxConcurrentRembg = 2
 
     var getStatus: (() -> ServerStatus)?
     var getRequestCount: (() -> Int)?
@@ -179,7 +177,8 @@ final class ProxyServer: @unchecked Sendable {
                 statusStr = "stopped"
                 ready = false
             }
-            let json = "{\"status\":\"\(statusStr)\",\"ready\":\(ready),\"requests_processed\":\(count)}"
+            let active = countActiveRembgConnections()
+            let json = "{\"status\":\"\(statusStr)\",\"ready\":\(ready),\"requests_processed\":\(count),\"active_rembg_connections\":\(active),\"max_concurrent\":\(maxConcurrentRembg)}"
             let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(json.utf8.count)\r\n\r\n\(json)"
             _ = response.withCString { ptr in
                 send(clientSocket, ptr, strlen(ptr), 0)
@@ -199,29 +198,21 @@ final class ProxyServer: @unchecked Sendable {
                 return
             }
 
-            // Limit concurrent rembg requests
-            requestLock.lock()
-            let current = activeRequests
-            if current >= maxConcurrentRequests {
-                requestLock.unlock()
-                let json = "{\"error\":\"too_many_requests\",\"message\":\"Max \(maxConcurrentRequests) concurrent requests, \(current) active\"}"
+            // Rate limit based on actual active connections to rembg
+            let active = countActiveRembgConnections()
+            if active >= maxConcurrentRembg {
+                let json = "{\"error\":\"too_many_requests\",\"message\":\"rembg is processing \(active) images, max \(maxConcurrentRembg)\"}"
                 let response = "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: 10\r\nContent-Length: \(json.utf8.count)\r\n\r\n\(json)"
                 _ = response.withCString { ptr in
                     send(clientSocket, ptr, strlen(ptr), 0)
                 }
                 return
             }
-            activeRequests += 1
-            requestLock.unlock()
         }
-
-        // Track whether we incremented the counter (for cleanup on all exit paths)
-        let isTrackedRequest = path.hasPrefix("/api/remove")
 
         // Forward to rembg
         let rembgSocket = socket(AF_INET, SOCK_STREAM, 0)
         guard rembgSocket >= 0 else {
-            if isTrackedRequest { decrementActiveRequests() }
             sendError(clientSocket, code: 502, message: "Failed to connect to rembg")
             return
         }
@@ -239,7 +230,6 @@ final class ProxyServer: @unchecked Sendable {
         }
 
         guard connectResult == 0 else {
-            if isTrackedRequest { decrementActiveRequests() }
             sendError(clientSocket, code: 502, message: "rembg not reachable")
             return
         }
@@ -289,12 +279,9 @@ final class ProxyServer: @unchecked Sendable {
             totalResponse += bytesRead
         }
 
-        // Track completion for /api/remove requests
-        if isTrackedRequest {
-            decrementActiveRequests()
-            if totalResponse > 0 {
-                onRequestCompleted?()
-            }
+        // Count completed requests
+        if totalResponse > 0 && path.hasPrefix("/api/remove") {
+            onRequestCompleted?()
         }
     }
 
@@ -312,10 +299,31 @@ final class ProxyServer: @unchecked Sendable {
     // Removed killProcessOnPort — SO_REUSEADDR handles port reuse,
     // and lsof can hang on macOS causing the proxy to never start.
 
-    private func decrementActiveRequests() {
-        requestLock.lock()
-        activeRequests -= 1
-        requestLock.unlock()
+    /// Count active TCP connections to rembg by checking established connections to port 7001.
+    /// This is the ground truth — no counters to leak.
+    private func countActiveRembgConnections() -> Int {
+        // Use netstat to count ESTABLISHED connections to port 7001
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/sbin/netstat")
+        p.arguments = ["-an"]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        do {
+            try p.run()
+            p.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            guard let output = String(data: data, encoding: .utf8) else { return 0 }
+            // Count lines with our rembg port in ESTABLISHED state
+            let port = ".\(rembgPort)"
+            return output.components(separatedBy: "\n")
+                .filter { line in
+                    line.contains(port) && line.contains("ESTABLISHED")
+                }
+                .count
+        } catch {
+            return 0
+        }
     }
 
     private func sendError(_ socket: Int32, code: Int, message: String) {
