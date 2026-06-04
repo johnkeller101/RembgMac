@@ -9,6 +9,9 @@ final class ProxyServer: @unchecked Sendable {
     private var serverSocket: Int32 = -1
     private var isListening = false
     private let queue = DispatchQueue(label: "com.rembgmac.proxy", attributes: .concurrent)
+    private var activeRequests = 0
+    private let maxConcurrentRequests = 2
+    private let requestLock = NSLock()
 
     var getStatus: (() -> ServerStatus)?
     var getRequestCount: (() -> Int)?
@@ -184,7 +187,7 @@ final class ProxyServer: @unchecked Sendable {
             return
         }
 
-        // For /api/remove — check if model is downloading
+        // For /api/remove — check constraints before forwarding
         if path.hasPrefix("/api/remove") {
             let status = getStatus?() ?? .stopped
             if case .downloadingModel = status {
@@ -195,6 +198,21 @@ final class ProxyServer: @unchecked Sendable {
                 }
                 return
             }
+
+            // Limit concurrent rembg requests
+            requestLock.lock()
+            let current = activeRequests
+            if current >= maxConcurrentRequests {
+                requestLock.unlock()
+                let json = "{\"error\":\"too_many_requests\",\"message\":\"Max \(maxConcurrentRequests) concurrent requests, \(current) active\"}"
+                let response = "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: 10\r\nContent-Length: \(json.utf8.count)\r\n\r\n\(json)"
+                _ = response.withCString { ptr in
+                    send(clientSocket, ptr, strlen(ptr), 0)
+                }
+                return
+            }
+            activeRequests += 1
+            requestLock.unlock()
         }
 
         // Forward to rembg
@@ -251,9 +269,15 @@ final class ProxyServer: @unchecked Sendable {
             totalResponse += bytesRead
         }
 
-        // Count successful request (if we got a response)
-        if totalResponse > 0 && path.hasPrefix("/api/remove") {
-            onRequestCompleted?()
+        // Track completion for /api/remove requests
+        if path.hasPrefix("/api/remove") {
+            requestLock.lock()
+            activeRequests -= 1
+            requestLock.unlock()
+
+            if totalResponse > 0 {
+                onRequestCompleted?()
+            }
         }
     }
 
