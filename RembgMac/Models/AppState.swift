@@ -28,6 +28,7 @@ final class AppState: ObservableObject {
 
     private let maxLogLines = 500
     private var requestCountWriteBuffer = 0
+    private var hasAttemptedAutoRepair = false
 
     var statusColor: Color {
         switch status {
@@ -35,6 +36,18 @@ final class AppState: ObservableObject {
         case .starting, .downloadingModel, .settingUp, .updating: return .orange
         case .unhealthy: return .yellow
         case .stopped: return .red
+        }
+    }
+
+    var statusIcon: String {
+        switch status {
+        case .running: return "checkmark.circle.fill"
+        case .starting: return "arrow.triangle.2.circlepath"
+        case .downloadingModel: return "arrow.down.circle.fill"
+        case .settingUp: return "gear"
+        case .updating: return "arrow.up.circle.fill"
+        case .unhealthy: return "exclamationmark.triangle.fill"
+        case .stopped: return "stop.circle.fill"
         }
     }
 
@@ -96,6 +109,19 @@ final class AppState: ObservableObject {
         processManager.onRequestCounted = { [weak self] in
             Task { @MainActor in
                 self?.requestCount += 1
+            }
+        }
+
+        processManager.onDependencyError = { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                // Only auto-repair once per launch to avoid infinite loops
+                if !self.hasAttemptedAutoRepair {
+                    self.hasAttemptedAutoRepair = true
+                    self.appendLog("[auto-repair] Dependency error detected, resetting environment...")
+                    await self.resetVenv()
+                    await self.runSetup()
+                }
             }
         }
 

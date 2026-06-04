@@ -18,7 +18,7 @@ struct RembgMacApp: App {
         MenuBarExtra {
             MenuContent(appState: appState)
         } label: {
-            Image(systemName: "circle.fill")
+            Image(systemName: appState.statusIcon)
                 .foregroundStyle(appState.statusColor)
         }
         .menuBarExtraStyle(.menu)

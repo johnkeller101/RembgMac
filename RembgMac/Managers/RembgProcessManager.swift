@@ -12,6 +12,7 @@ final class RembgProcessManager: @unchecked Sendable {
     var onLog: ((String) -> Void)?
     var onStatusChange: ((ServerStatus) -> Void)?
     var onRequestCounted: (() -> Void)?
+    var onDependencyError: (() -> Void)?
 
     private var pythonPath: String {
         appSupportDir.appendingPathComponent("venv/bin/python3").path
@@ -106,6 +107,13 @@ final class RembgProcessManager: @unchecked Sendable {
         if lower.contains("uvicorn running on") || lower.contains("application startup complete") {
             onStatusChange?(.running)
             restartCount = 0  // Stable start, reset backoff
+        }
+
+        // Detect dependency errors (missing onnxruntime, CLI deps, etc.)
+        if lower.contains("dependencies are not installed") ||
+           lower.contains("no onnxruntime backend found") ||
+           lower.contains("no module named") {
+            onDependencyError?()
         }
 
         // Count successful requests
