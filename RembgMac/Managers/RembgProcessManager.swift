@@ -5,9 +5,10 @@ final class RembgProcessManager: @unchecked Sendable {
     private var process: Process?
     private var outputPipe: Pipe?
     private var restartCount = 0
-    private var lastStartTime: Date?
+    private var lastStableStart: Date?
     private var intentionalStop = false
     private let maxBackoff: TimeInterval = 60
+    private let launchQueue = DispatchQueue(label: "com.rembgmac.process")
 
     var onLog: ((String) -> Void)?
     var onStatusChange: ((ServerStatus) -> Void)?
@@ -18,6 +19,10 @@ final class RembgProcessManager: @unchecked Sendable {
         appSupportDir.appendingPathComponent("venv/bin/python3").path
     }
 
+    private var rembgBinPath: String {
+        appSupportDir.appendingPathComponent("venv/bin/rembg").path
+    }
+
     private var pidFilePath: String {
         appSupportDir.appendingPathComponent("rembg.pid").path
     }
@@ -26,58 +31,50 @@ final class RembgProcessManager: @unchecked Sendable {
 
     init(appSupportDir: URL) {
         self.appSupportDir = appSupportDir
-        // Kill any stale process from a previous app session (off main thread)
-        DispatchQueue.global().async { [weak self] in
-            self?.killStalePidFile()
-        }
     }
 
     deinit {
-        killProcess()
+        forceKillProcess()
     }
 
     func start() {
         intentionalStop = false
-        DispatchQueue.global().async { [weak self] in
-            self?.launchProcess()
+        launchQueue.async { [weak self] in
+            self?.cleanupAndLaunch()
         }
     }
 
     func stop() {
         intentionalStop = true
-        // Kill synchronously but quickly — terminate sends SIGTERM immediately
-        if let proc = process, proc.isRunning {
-            proc.terminate()
-        }
-        outputPipe?.fileHandleForReading.readabilityHandler = nil
-        // Clean up PID file and force-kill in background if needed
-        let pid = process?.processIdentifier
-        process = nil
-        outputPipe = nil
-        try? FileManager.default.removeItem(atPath: pidFilePath)
-        if let pid {
-            DispatchQueue.global().async {
-                usleep(500_000)
-                kill(pid, SIGKILL) // Ensure it's dead
-            }
-        }
+        forceKillProcess()
         onStatusChange?(.stopped)
     }
 
-    private func launchProcess() {
-        killProcess()
+    // MARK: - Launch
 
-        // First, log diagnostic info about the rembg installation
-        logDiagnostics()
+    private func cleanupAndLaunch() {
+        // 1. Kill any tracked process
+        forceKillProcess()
 
-        let args = ["-m", "rembg.cli", "s", "--host", "127.0.0.1", "--port", "7001", "--log_level", "info"]
-        onLog?("[launch] Command: \(pythonPath) \(args.joined(separator: " "))")
-        onLog?("[launch] Python exists: \(FileManager.default.fileExists(atPath: pythonPath))")
+        // 2. Kill any stale process from a previous app session
+        killStalePidFile()
 
+        // 3. Run diagnostics (results logged inline)
+        runDiagnostics()
+
+        // 4. Decide how to invoke rembg: prefer the bin script, fall back to -m
+        let (executable, args) = buildCommand()
+
+        log("[launch] \(executable) \(args.joined(separator: " "))")
+
+        // 5. Launch
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: pythonPath)
+        proc.executableURL = URL(fileURLWithPath: executable)
         proc.arguments = args
-        proc.environment = ProcessInfo.processInfo.environment
+        // Give the process a clean environment with just PATH
+        var env = ProcessInfo.processInfo.environment
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        proc.environment = env
 
         let pipe = Pipe()
         proc.standardOutput = pipe
@@ -85,9 +82,8 @@ final class RembgProcessManager: @unchecked Sendable {
 
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
-            guard let output = String(data: data, encoding: .utf8) else { return }
-
+            guard !data.isEmpty,
+                  let output = String(data: data, encoding: .utf8) else { return }
             for line in output.components(separatedBy: .newlines) where !line.isEmpty {
                 self?.handleLogLine(line)
             }
@@ -95,7 +91,7 @@ final class RembgProcessManager: @unchecked Sendable {
 
         proc.terminationHandler = { [weak self] proc in
             guard let self, !self.intentionalStop else { return }
-            self.onLog?("Process exited with code \(proc.terminationStatus) (reason: \(proc.terminationReason == .exit ? "normal exit" : "uncaught signal"))")
+            self.log("Process exited with code \(proc.terminationStatus) (\(proc.terminationReason == .exit ? "exit" : "signal"))")
             self.onStatusChange?(.stopped)
             self.scheduleRestart()
         }
@@ -104,114 +100,158 @@ final class RembgProcessManager: @unchecked Sendable {
             try proc.run()
             self.process = proc
             self.outputPipe = pipe
-            self.lastStartTime = Date()
-            // Write PID so we can clean up stale processes on next launch
-            try? String(proc.processIdentifier).write(toFile: pidFilePath, atomically: true, encoding: .utf8)
+            self.lastStableStart = Date()
+            writePidFile(proc.processIdentifier)
             onStatusChange?(.starting)
-            onLog?("Started rembg server (PID \(proc.processIdentifier))")
+            log("Started rembg server (PID \(proc.processIdentifier))")
         } catch {
-            onLog?("Failed to start: \(error.localizedDescription)")
+            log("[launch] Failed to start: \(error.localizedDescription)")
             onStatusChange?(.stopped)
             scheduleRestart()
         }
     }
 
-    private func killProcess() {
-        if let proc = process, proc.isRunning {
-            let pid = proc.processIdentifier
-            proc.terminate()
-            // Wait up to 2 seconds for graceful exit
-            for _ in 0..<20 {
-                if !proc.isRunning { break }
-                usleep(100_000)
-            }
-            // Force kill if still alive
-            if proc.isRunning {
-                kill(pid, SIGKILL)
-                proc.waitUntilExit()
-            }
+    /// Decide how to invoke rembg. Prefer the venv bin script if it exists.
+    private func buildCommand() -> (String, [String]) {
+        // Check if the rembg binary exists in the venv (installed via [cli] extra)
+        if FileManager.default.fileExists(atPath: rembgBinPath) {
+            return (rembgBinPath, ["s", "--host", "127.0.0.1", "--port", "7001", "--log_level", "info"])
         }
-        outputPipe?.fileHandleForReading.readabilityHandler = nil
-        process = nil
-        outputPipe = nil
-        try? FileManager.default.removeItem(atPath: pidFilePath)
+        // Fall back to python -m
+        return (pythonPath, ["-m", "rembg.cli", "s", "--host", "127.0.0.1", "--port", "7001", "--log_level", "info"])
     }
 
-    /// On app launch, kill any rembg process left over from a previous session.
+    // MARK: - Process lifecycle
+
+    private func forceKillProcess() {
+        guard let proc = process else {
+            outputPipe?.fileHandleForReading.readabilityHandler = nil
+            outputPipe = nil
+            return
+        }
+
+        let pid = proc.processIdentifier
+        outputPipe?.fileHandleForReading.readabilityHandler = nil
+
+        if proc.isRunning {
+            proc.terminate()
+            // Wait briefly
+            for _ in 0..<10 {
+                if !proc.isRunning { break }
+                usleep(100_000) // 100ms, total max 1s
+            }
+            if proc.isRunning {
+                kill(pid, SIGKILL)
+            }
+        }
+
+        process = nil
+        outputPipe = nil
+        removePidFile()
+    }
+
     private func killStalePidFile() {
         guard let pidStr = try? String(contentsOfFile: pidFilePath, encoding: .utf8),
               let pid = Int32(pidStr.trimmingCharacters(in: .whitespacesAndNewlines)),
               pid > 0 else { return }
 
-        // Check if this PID is actually a python/rembg process (not some unrelated process that reused the PID)
         if kill(pid, 0) == 0 {
-            onLog?("Killing stale rembg process from previous session (PID \(pid))")
+            log("[cleanup] Killing stale rembg (PID \(pid)) from previous session")
             kill(pid, SIGTERM)
             usleep(500_000)
             if kill(pid, 0) == 0 {
                 kill(pid, SIGKILL)
+                usleep(200_000)
             }
         }
+        removePidFile()
+    }
+
+    private func writePidFile(_ pid: Int32) {
+        try? "\(pid)".write(toFile: pidFilePath, atomically: true, encoding: .utf8)
+    }
+
+    private func removePidFile() {
         try? FileManager.default.removeItem(atPath: pidFilePath)
     }
 
-    /// Run diagnostic commands to understand the rembg installation state.
-    private func logDiagnostics() {
-        // Check rembg version and available subcommands
-        let commands: [(String, [String])] = [
-            ("rembg --help", ["-m", "rembg.cli", "--help"]),
-            ("pip list (rembg/onnx)", ["-m", "pip", "list"]),
-            ("python version", ["--version"]),
-        ]
+    // MARK: - Diagnostics
 
-        for (label, args) in commands {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: pythonPath)
-            p.arguments = args
-            let pipe = Pipe()
-            p.standardOutput = pipe
-            p.standardError = pipe
-            do {
-                try p.run()
-                p.waitUntilExit()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                var output = String(data: data, encoding: .utf8) ?? "(no output)"
-                // For pip list, filter to relevant packages
-                if label.contains("pip") {
-                    let relevant = output.components(separatedBy: "\n")
-                        .filter { line in
-                            let l = line.lowercased()
-                            return l.contains("rembg") || l.contains("onnx") || l.contains("uvicorn") || l.contains("fastapi")
-                        }
-                    output = relevant.isEmpty ? "(no rembg/onnx packages found)" : relevant.joined(separator: "\n")
+    /// Run diagnostic checks and log results. Runs synchronously on launch queue.
+    private func runDiagnostics() {
+        log("[diag] Python: \(pythonPath) (exists: \(FileManager.default.fileExists(atPath: pythonPath)))")
+        log("[diag] rembg bin: \(rembgBinPath) (exists: \(FileManager.default.fileExists(atPath: rembgBinPath)))")
+
+        // Python version
+        if let output = runQuickCommand(pythonPath, args: ["--version"]) {
+            log("[diag] \(output)")
+        }
+
+        // rembg help — what subcommands exist?
+        if FileManager.default.fileExists(atPath: rembgBinPath) {
+            if let output = runQuickCommand(rembgBinPath, args: ["--help"]) {
+                log("[diag] rembg --help:\n\(output)")
+            }
+        } else if let output = runQuickCommand(pythonPath, args: ["-m", "rembg.cli", "--help"]) {
+            log("[diag] rembg.cli --help:\n\(output)")
+        }
+
+        // Relevant pip packages
+        if let output = runQuickCommand(pythonPath, args: ["-m", "pip", "list", "--format=columns"]) {
+            let relevant = output.components(separatedBy: "\n")
+                .filter { l in
+                    let low = l.lowercased()
+                    return low.contains("rembg") || low.contains("onnx") || low.contains("uvicorn") || low.contains("fastapi")
                 }
-                onLog?("[diag] \(label) (exit \(p.terminationStatus)):\n\(output.trimmingCharacters(in: .whitespacesAndNewlines))")
-            } catch {
-                onLog?("[diag] \(label): FAILED — \(error.localizedDescription)")
+            if relevant.isEmpty {
+                log("[diag] pip: NO rembg/onnx/uvicorn/fastapi packages found!")
+            } else {
+                log("[diag] pip packages:\n\(relevant.joined(separator: "\n"))")
             }
         }
     }
 
+    /// Run a quick command and return its combined stdout+stderr. Returns nil on failure.
+    private func runQuickCommand(_ executable: String, args: [String]) -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: executable)
+        p.arguments = args
+        p.environment = ProcessInfo.processInfo.environment
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        do {
+            try p.run()
+            p.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            return "FAILED: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - Log handling
+
     private func handleLogLine(_ line: String) {
-        onLog?(line)
+        log(line)
 
         let lower = line.lowercased()
 
         // Detect model downloading
-        if lower.contains("downloading") || lower.contains("download") {
+        if lower.contains("downloading") && !lower.contains("pip") {
             onStatusChange?(.downloadingModel)
         }
 
         // Detect server ready
         if lower.contains("uvicorn running on") || lower.contains("application startup complete") {
             onStatusChange?(.running)
-            restartCount = 0  // Stable start, reset backoff
+            restartCount = 0
         }
 
-        // Detect dependency errors (missing onnxruntime, CLI deps, etc.)
-        if lower.contains("dependencies are not installed") ||
-           lower.contains("no onnxruntime backend found") ||
-           lower.contains("no module named") {
+        // Detect dependency errors — but NOT from our own diagnostics
+        if (lower.contains("dependencies are not installed") ||
+            lower.contains("no onnxruntime backend found") ||
+            lower.contains("no module named 'onnxruntime'")) {
             onDependencyError?()
         }
 
@@ -221,21 +261,28 @@ final class RembgProcessManager: @unchecked Sendable {
         }
     }
 
+    private func log(_ message: String) {
+        onLog?(message)
+    }
+
+    // MARK: - Restart
+
     private func scheduleRestart() {
+        guard !intentionalStop else { return }
+
         // Reset backoff if server was stable for >5 minutes
-        if let start = lastStartTime, Date().timeIntervalSince(start) > 300 {
+        if let start = lastStableStart, Date().timeIntervalSince(start) > 300 {
             restartCount = 0
         }
 
         let delay = min(pow(2.0, Double(restartCount)), maxBackoff)
         restartCount += 1
 
-        onLog?("Restarting in \(Int(delay))s (attempt \(restartCount))...")
+        log("Restarting in \(Int(delay))s (attempt \(restartCount))...")
 
-        DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
+        launchQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, !self.intentionalStop else { return }
-            self.launchProcess()
+            self.cleanupAndLaunch()
         }
     }
-
 }
