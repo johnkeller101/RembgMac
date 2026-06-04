@@ -135,6 +135,14 @@ final class AppState: ObservableObject {
         startTime = nil
     }
 
+    func resetVenv() async {
+        stopServer()
+        appendLog("[reset] Deleting virtual environment...")
+        venvManager.deleteVenv()
+        venvExists = false
+        appendLog("[reset] Done — click Setup to reinstall")
+    }
+
     func runSetup() async {
         status = .settingUp("Creating virtual environment...")
         do {

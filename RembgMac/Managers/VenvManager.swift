@@ -13,6 +13,10 @@ final class VenvManager {
         FileManager.default.fileExists(atPath: pythonPath.path)
     }
 
+    func deleteVenv() {
+        try? FileManager.default.removeItem(at: venvDir)
+    }
+
     /// Creates a virtual environment and installs rembg[cli].
     func createVenvAndInstall(progress: @escaping (String) -> Void) async throws {
         // Ensure app support directory exists

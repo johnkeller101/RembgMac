@@ -81,6 +81,10 @@ struct MenuContent: View {
         Button("Update rembg") {
             Task { await appState.runUpgrade() }
         }
+
+        Button("Reset Environment") {
+            Task { await appState.resetVenv() }
+        }
         .disabled(!appState.venvExists || {
             switch appState.status {
             case .settingUp, .updating: return true
