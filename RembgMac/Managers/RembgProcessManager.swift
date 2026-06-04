@@ -74,6 +74,9 @@ final class RembgProcessManager: @unchecked Sendable {
         // Give the process a clean environment with just PATH
         var env = ProcessInfo.processInfo.environment
         env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["BROWSER"] = ""          // Prevent Python webbrowser module from opening
+        env["GRADIO_SERVER_NAME"] = "127.0.0.1"  // Prevent Gradio from auto-opening browser
+        env["GRADIO_ANALYTICS_ENABLED"] = "False"
         proc.environment = env
 
         let pipe = Pipe()

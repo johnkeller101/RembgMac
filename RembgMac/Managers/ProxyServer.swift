@@ -155,8 +155,8 @@ final class ProxyServer: @unchecked Sendable {
         guard parts.count >= 2 else { return }
         let path = String(parts[1])
 
-        // Handle /status endpoint
-        if path == "/status" || path == "/" {
+        // Handle /status and any non-API path
+        if !path.hasPrefix("/api/") {
             let status = getStatus?() ?? .stopped
             let count = getRequestCount?() ?? 0
             let statusStr: String
