@@ -31,7 +31,7 @@ final class HealthChecker: @unchecked Sendable {
     }
 
     private func check() async -> Bool {
-        guard let url = URL(string: "http://localhost:7000/status") else { return false }
+        guard let url = URL(string: "http://localhost:7100/status") else { return false }
         var request = URLRequest(url: url)
         request.timeoutInterval = 5
 

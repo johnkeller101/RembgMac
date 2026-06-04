@@ -53,7 +53,7 @@ final class AppState: ObservableObject {
 
     var statusText: String {
         switch status {
-        case .running: return "rembg running on :7000"
+        case .running: return "rembg running on :7100"
         case .starting: return "Starting rembg..."
         case .downloadingModel: return "Downloading model..."
         case .settingUp(let msg): return msg.isEmpty ? "Setting up..." : msg

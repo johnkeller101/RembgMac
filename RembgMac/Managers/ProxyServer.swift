@@ -5,7 +5,7 @@ import Foundation
 final class ProxyServer: @unchecked Sendable {
     private var listener: Any?  // NWListener stored as Any to avoid import issues
     private let rembgPort = 7001
-    private let listenPort: UInt16 = 7000
+    private let listenPort: UInt16 = 7100
     private var serverSocket: Int32 = -1
     private var isListening = false
     private let queue = DispatchQueue(label: "com.rembgmac.proxy", attributes: .concurrent)
