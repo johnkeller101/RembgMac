@@ -1,9 +1,9 @@
 import Foundation
 
-/// Lightweight HTTP server on port 7000 that proxies to rembg on port 7001.
-/// Returns 503 when the model is downloading, and exposes /status.
+/// HTTP server on port 7100 that proxies /api/ requests to rembg on port 7001.
+/// Returns 503 when the model is downloading, and exposes /status for health checks.
+/// Uses NWListener + URLSession for proper HTTP handling instead of raw sockets.
 final class ProxyServer: @unchecked Sendable {
-    private var listener: Any?  // NWListener stored as Any to avoid import issues
     private let rembgPort = 7001
     private let listenPort: UInt16 = 7100
     private var serverSocket: Int32 = -1
@@ -15,6 +15,7 @@ final class ProxyServer: @unchecked Sendable {
     var getRequestCount: (() -> Int)?
     var onRequestCompleted: (() -> Void)?
     var onLog: ((String) -> Void)?
+    var rembgPid: (() -> Int32?)?
 
     func start() {
         stop()
@@ -98,13 +99,12 @@ final class ProxyServer: @unchecked Sendable {
     private func handleConnection(_ clientSocket: Int32) {
         defer { close(clientSocket) }
 
-        // Read the request (up to 50MB for image uploads)
+        // Read the full HTTP request from the client
         var requestData = Data()
         let bufferSize = 65536
         let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
         defer { buffer.deallocate() }
 
-        // Set receive timeout to 30s
         var timeout = timeval(tv_sec: 30, tv_usec: 0)
         setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
 
@@ -114,9 +114,7 @@ final class ProxyServer: @unchecked Sendable {
             if bytesRead <= 0 { break }
             requestData.append(buffer, count: bytesRead)
 
-            // Check if we have the full headers
             if let headerEnd = requestData.range(of: Data("\r\n\r\n".utf8)) {
-                // Parse Content-Length to know how much body to expect
                 let headerStr = String(data: requestData[..<headerEnd.lowerBound], encoding: .utf8) ?? ""
                 let contentLength = parseContentLength(headerStr)
                 let bodyStart = headerEnd.upperBound
@@ -124,7 +122,6 @@ final class ProxyServer: @unchecked Sendable {
                 let bodyRemaining = contentLength - bodyReceived
 
                 if bodyRemaining > 0 {
-                    // Read remaining body
                     var remaining = bodyRemaining
                     while remaining > 0 {
                         let toRead = min(remaining, bufferSize)
@@ -137,13 +134,12 @@ final class ProxyServer: @unchecked Sendable {
                 break
             }
 
-            // Safety: don't read more than 50MB
             if requestData.count > 50 * 1024 * 1024 { break }
         }
 
         guard !requestData.isEmpty else { return }
 
-        // Parse the request line
+        // Parse the request
         guard let headerEnd = requestData.range(of: Data("\r\n\r\n".utf8)),
               let headerStr = String(data: requestData[..<headerEnd.lowerBound], encoding: .utf8),
               let firstLine = headerStr.components(separatedBy: "\r\n").first else {
@@ -152,9 +148,10 @@ final class ProxyServer: @unchecked Sendable {
 
         let parts = firstLine.split(separator: " ")
         guard parts.count >= 2 else { return }
+        let method = String(parts[0])
         let path = String(parts[1])
 
-        // Handle /status and any non-API path
+        // Handle /status and any non-API path locally
         if !path.hasPrefix("/api/") {
             let status = getStatus?() ?? .stopped
             let count = getRequestCount?() ?? 0
@@ -177,101 +174,91 @@ final class ProxyServer: @unchecked Sendable {
                 statusStr = "stopped"
                 ready = false
             }
-            let active = countActiveRembgConnections()
-            let json = "{\"status\":\"\(statusStr)\",\"ready\":\(ready),\"requests_processed\":\(count),\"active_rembg_connections\":\(active),\"max_concurrent\":\(maxConcurrentRembg)}"
-            let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(json.utf8.count)\r\n\r\n\(json)"
-            _ = response.withCString { ptr in
-                send(clientSocket, ptr, strlen(ptr), 0)
-            }
+            let json = "{\"status\":\"\(statusStr)\",\"ready\":\(ready),\"requests_processed\":\(count)}"
+            sendResponse(clientSocket, status: 200, statusText: "OK", contentType: "application/json", body: Data(json.utf8))
             return
         }
 
-        // For /api/remove — check constraints before forwarding
+        // For /api/remove — check if model is downloading
         if path.hasPrefix("/api/remove") {
             let status = getStatus?() ?? .stopped
             if case .downloadingModel = status {
                 let json = "{\"status\":\"downloading_model\",\"message\":\"Model is being downloaded, please retry shortly\"}"
-                let response = "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nRetry-After: 30\r\nContent-Length: \(json.utf8.count)\r\n\r\n\(json)"
-                _ = response.withCString { ptr in
-                    send(clientSocket, ptr, strlen(ptr), 0)
-                }
+                sendResponse(clientSocket, status: 503, statusText: "Service Unavailable", contentType: "application/json", body: Data(json.utf8), extraHeaders: "Retry-After: 30\r\n")
                 return
             }
-
         }
 
-        // Forward to rembg
-        let rembgSocket = socket(AF_INET, SOCK_STREAM, 0)
-        guard rembgSocket >= 0 else {
-            sendError(clientSocket, code: 502, message: "Failed to connect to rembg")
-            return
-        }
-        defer { close(rembgSocket) }
+        // Forward to rembg using URLSession for proper HTTP handling
+        let bodyData = requestData[headerEnd.upperBound...]
 
-        var rembgAddr = sockaddr_in()
-        rembgAddr.sin_family = sa_family_t(AF_INET)
-        rembgAddr.sin_port = UInt16(rembgPort).bigEndian
-        rembgAddr.sin_addr.s_addr = inet_addr("127.0.0.1")
-
-        let connectResult = withUnsafePointer(to: &rembgAddr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                connect(rembgSocket, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+        // Parse headers from the original request
+        let headerLines = headerStr.components(separatedBy: "\r\n").dropFirst() // skip request line
+        var contentType = "application/octet-stream"
+        for line in headerLines {
+            let lower = line.lowercased()
+            if lower.hasPrefix("content-type:") {
+                contentType = String(line.dropFirst("content-type:".count)).trimmingCharacters(in: .whitespaces)
             }
         }
 
-        guard connectResult == 0 else {
-            sendError(clientSocket, code: 502, message: "rembg not reachable")
-            return
+        // Build URLRequest to rembg
+        let rembgURL = URL(string: "http://127.0.0.1:\(rembgPort)\(path)")!
+        var urlRequest = URLRequest(url: rembgURL)
+        urlRequest.httpMethod = method
+        urlRequest.httpBody = Data(bodyData)
+        urlRequest.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        urlRequest.timeoutInterval = 300 // 5 min for large images
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var responseData = Data()
+        var responseCode = 502
+        var responseContentType = "application/octet-stream"
+
+        let task = URLSession.shared.dataTask(with: urlRequest) { data, response, error in
+            if let error {
+                let json = "{\"error\":\"rembg proxy error: \(error.localizedDescription)\"}"
+                responseData = Data(json.utf8)
+                responseCode = 502
+                responseContentType = "application/json"
+            } else if let http = response as? HTTPURLResponse, let data {
+                responseData = data
+                responseCode = http.statusCode
+                responseContentType = http.value(forHTTPHeaderField: "Content-Type") ?? "application/octet-stream"
+            }
+            semaphore.signal()
+        }
+        task.resume()
+        semaphore.wait()
+
+        // Send response back to client
+        sendResponse(clientSocket, status: responseCode, statusText: httpStatusText(responseCode), contentType: responseContentType, body: responseData, extraHeaders: "Connection: close\r\n")
+
+        // Count completed requests
+        if responseCode == 200 && path.hasPrefix("/api/remove") {
+            onRequestCompleted?()
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func sendResponse(_ socket: Int32, status: Int, statusText: String, contentType: String, body: Data, extraHeaders: String = "") {
+        let header = "HTTP/1.1 \(status) \(statusText)\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.count)\r\n\(extraHeaders)\r\n"
+        let headerData = Data(header.utf8)
+
+        headerData.withUnsafeBytes { ptr in
+            guard let base = ptr.baseAddress else { return }
+            _ = send(socket, base, headerData.count, 0)
         }
 
-        // Set timeouts on rembg socket (5 min for large images)
-        var rembgTimeout = timeval(tv_sec: 300, tv_usec: 0)
-        setsockopt(rembgSocket, SOL_SOCKET, SO_RCVTIMEO, &rembgTimeout, socklen_t(MemoryLayout<timeval>.size))
-        setsockopt(rembgSocket, SOL_SOCKET, SO_SNDTIMEO, &rembgTimeout, socklen_t(MemoryLayout<timeval>.size))
-
-        // Send full request to rembg
-        requestData.withUnsafeBytes { rawPtr in
-            guard let ptr = rawPtr.baseAddress else { return }
+        body.withUnsafeBytes { ptr in
+            guard let base = ptr.baseAddress else { return }
             var sent = 0
-            while sent < requestData.count {
-                let n = send(rembgSocket, ptr + sent, requestData.count - sent, 0)
+            while sent < body.count {
+                let n = send(socket, base + sent, body.count - sent, 0)
                 if n <= 0 { break }
                 sent += n
             }
-        }
-
-        // Read response from rembg and forward to client
-        // Inject "Connection: close" so the Go client doesn't try to reuse this socket
-        var totalResponse = 0
-        var headerInjected = false
-        while true {
-            let bytesRead = recv(rembgSocket, buffer, bufferSize, 0)
-            if bytesRead <= 0 { break }
-
-            var dataToSend = Data(bytes: buffer, count: bytesRead)
-
-            // Inject Connection: close into the first chunk (contains HTTP headers)
-            if !headerInjected, let headerEnd = dataToSend.range(of: Data("\r\n\r\n".utf8)) {
-                let closeHeader = Data("Connection: close\r\n".utf8)
-                dataToSend.insert(contentsOf: closeHeader, at: headerEnd.lowerBound)
-                headerInjected = true
-            }
-
-            dataToSend.withUnsafeBytes { rawPtr in
-                guard let ptr = rawPtr.baseAddress else { return }
-                var sent = 0
-                while sent < dataToSend.count {
-                    let n = send(clientSocket, ptr + sent, dataToSend.count - sent, 0)
-                    if n <= 0 { break }
-                    sent += n
-                }
-            }
-            totalResponse += bytesRead
-        }
-
-        // Count completed requests
-        if totalResponse > 0 && path.hasPrefix("/api/remove") {
-            onRequestCompleted?()
         }
     }
 
@@ -286,45 +273,16 @@ final class ProxyServer: @unchecked Sendable {
         return 0
     }
 
-    // Removed killProcessOnPort — SO_REUSEADDR handles port reuse,
-    // and lsof can hang on macOS causing the proxy to never start.
-
-    /// Check if rembg Python process is actively processing by checking its CPU usage.
-    /// Returns the number of active threads consuming CPU (>10% = busy processing an image).
-    var rembgPid: (() -> Int32?)?
-
-    private func countActiveRembgConnections() -> Int {
-        guard let pid = rembgPid?() else { return 0 }
-
-        // ps -o %cpu= -p <pid> returns CPU percentage
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/ps")
-        p.arguments = ["-o", "%cpu=", "-p", "\(pid)"]
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = FileHandle.nullDevice
-        do {
-            try p.run()
-            p.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            guard let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  let cpu = Double(output) else { return 0 }
-            // If CPU > 10%, rembg is actively processing at least one image
-            // If CPU > 150%, likely processing multiple (multi-threaded ONNX)
-            if cpu > 150 { return 2 }
-            if cpu > 10 { return 1 }
-            return 0
-        } catch {
-            return 0
-        }
-    }
-
-    private func sendError(_ socket: Int32, code: Int, message: String) {
-        let json = "{\"error\":\"\(message)\"}"
-        let statusText = code == 502 ? "Bad Gateway" : "Service Unavailable"
-        let response = "HTTP/1.1 \(code) \(statusText)\r\nContent-Type: application/json\r\nContent-Length: \(json.utf8.count)\r\n\r\n\(json)"
-        _ = response.withCString { ptr in
-            send(socket, ptr, strlen(ptr), 0)
+    private func httpStatusText(_ code: Int) -> String {
+        switch code {
+        case 200: return "OK"
+        case 400: return "Bad Request"
+        case 404: return "Not Found"
+        case 429: return "Too Many Requests"
+        case 500: return "Internal Server Error"
+        case 502: return "Bad Gateway"
+        case 503: return "Service Unavailable"
+        default: return "Unknown"
         }
     }
 }
