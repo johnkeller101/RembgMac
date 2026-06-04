@@ -93,6 +93,14 @@ struct MenuContent: View {
             }
         }())
 
+        Button("Open Web UI") {
+            NSWorkspace.shared.open(URL(string: "http://localhost:7001")!)
+        }
+        .disabled({
+            if case .running = appState.status { return false }
+            return true
+        }())
+
         Button("View Logs") {
             // openWindow doesn't reliably work in menu-style MenuBarExtra,
             // so we find or create the window via AppKit directly
