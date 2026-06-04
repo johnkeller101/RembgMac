@@ -198,16 +198,6 @@ final class ProxyServer: @unchecked Sendable {
                 return
             }
 
-            // Rate limit based on actual active connections to rembg
-            let active = countActiveRembgConnections()
-            if active >= maxConcurrentRembg {
-                let json = "{\"error\":\"too_many_requests\",\"message\":\"rembg is processing \(active) images, max \(maxConcurrentRembg)\"}"
-                let response = "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: 10\r\nContent-Length: \(json.utf8.count)\r\n\r\n\(json)"
-                _ = response.withCString { ptr in
-                    send(clientSocket, ptr, strlen(ptr), 0)
-                }
-                return
-            }
         }
 
         // Forward to rembg
