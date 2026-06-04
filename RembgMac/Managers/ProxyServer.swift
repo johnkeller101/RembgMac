@@ -25,6 +25,7 @@ final class ProxyServer: @unchecked Sendable {
 
     private func startInternal() {
         killProcessOnPort(listenPort)
+        killProcessOnPort(UInt16(rembgPort))
 
         serverSocket = socket(AF_INET, SOCK_STREAM, 0)
         guard serverSocket >= 0 else {

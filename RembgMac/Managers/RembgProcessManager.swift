@@ -41,7 +41,6 @@ final class RembgProcessManager: @unchecked Sendable {
 
     private func launchProcess() {
         killProcess()
-        killOrphanedRembgProcesses()
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pythonPath)
@@ -96,30 +95,6 @@ final class RembgProcessManager: @unchecked Sendable {
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         process = nil
         outputPipe = nil
-    }
-
-    /// Kill any orphaned rembg/python processes on port 7001 left from crash loops.
-    private func killOrphanedRembgProcesses() {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/lsof")
-        proc.arguments = ["-ti", ":7001"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        try? proc.run()
-        proc.waitUntilExit()
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !output.isEmpty else { return }
-
-        for pidStr in output.components(separatedBy: "\n") {
-            if let pid = Int32(pidStr.trimmingCharacters(in: .whitespaces)), pid != getpid() {
-                onLog?("Killing orphaned process \(pid) on port 7001")
-                kill(pid, SIGKILL)
-            }
-        }
-        usleep(300_000)
     }
 
     private func handleLogLine(_ line: String) {
