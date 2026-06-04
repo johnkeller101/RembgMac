@@ -24,6 +24,7 @@ final class AppState: ObservableObject {
     let processManager: RembgProcessManager
     let venvManager: VenvManager
     let healthChecker: HealthChecker
+    let proxyServer: ProxyServer
 
     private let maxLogLines = 500
     private var requestCountWriteBuffer = 0
@@ -68,6 +69,7 @@ final class AppState: ObservableObject {
         self.venvManager = VenvManager(appSupportDir: appSupport)
         self.processManager = RembgProcessManager(appSupportDir: appSupport)
         self.healthChecker = HealthChecker()
+        self.proxyServer = ProxyServer()
 
         self.venvExists = venvManager.venvExists
 
@@ -97,6 +99,23 @@ final class AppState: ObservableObject {
             }
         }
 
+        proxyServer.getStatus = { [weak self] in
+            self?.status ?? .stopped
+        }
+        proxyServer.getRequestCount = { [weak self] in
+            self?.requestCount ?? 0
+        }
+        proxyServer.onRequestCompleted = { [weak self] in
+            Task { @MainActor in
+                self?.requestCount += 1
+            }
+        }
+        proxyServer.onLog = { [weak self] line in
+            Task { @MainActor in
+                self?.appendLog(line)
+            }
+        }
+
         // Auto-start server if venv is ready
         if venvExists {
             Task { @MainActor [weak self] in
@@ -109,6 +128,7 @@ final class AppState: ObservableObject {
         guard venvExists else { return }
         status = .starting
         startTime = nil
+        proxyServer.start()
         processManager.start()
         healthChecker.startChecking { [weak self] healthy in
             Task { @MainActor in
@@ -131,6 +151,7 @@ final class AppState: ObservableObject {
     func stopServer() {
         healthChecker.stop()
         processManager.stop()
+        proxyServer.stop()
         status = .stopped
         startTime = nil
     }

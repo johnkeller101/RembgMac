@@ -17,6 +17,24 @@ final class VenvManager {
         try? FileManager.default.removeItem(at: venvDir)
     }
 
+    var venvSize: String {
+        guard venvExists else { return "" }
+        let size = directorySize(url: venvDir)
+        return ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
+    }
+
+    private func directorySize(url: URL) -> UInt64 {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]) else { return 0 }
+        var total: UInt64 = 0
+        for case let fileURL as URL in enumerator {
+            if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                total += UInt64(size)
+            }
+        }
+        return total
+    }
+
     /// Creates a virtual environment and installs rembg[cli].
     func createVenvAndInstall(progress: @escaping (String) -> Void) async throws {
         // Ensure app support directory exists

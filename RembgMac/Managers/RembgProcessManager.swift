@@ -39,7 +39,7 @@ final class RembgProcessManager: @unchecked Sendable {
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pythonPath)
-        proc.arguments = ["-m", "rembg.cli", "s", "--host", "0.0.0.0", "--port", "7000", "--log_level", "info"]
+        proc.arguments = ["-m", "rembg.cli", "s", "--host", "127.0.0.1", "--port", "7001", "--log_level", "info"]
         proc.environment = ProcessInfo.processInfo.environment
 
         let pipe = Pipe()
@@ -70,11 +70,6 @@ final class RembgProcessManager: @unchecked Sendable {
             self.lastStartTime = Date()
             onStatusChange?(.starting)
             onLog?("Started rembg server (PID \(proc.processIdentifier))")
-
-            // Send warm-up request after a delay to trigger model download
-            DispatchQueue.global().asyncAfter(deadline: .now() + 5) { [weak self] in
-                self?.sendWarmupRequest()
-            }
         } catch {
             onLog?("Failed to start: \(error.localizedDescription)")
             onStatusChange?(.stopped)
@@ -136,49 +131,4 @@ final class RembgProcessManager: @unchecked Sendable {
         }
     }
 
-    private func sendWarmupRequest() {
-        guard isRunning else { return }
-
-        // Create a tiny 1x1 red PNG to trigger model download
-        let tinyPNG = createTinyPNG()
-
-        var request = URLRequest(url: URL(string: "http://localhost:7000/api/remove")!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 300  // Model download can take a while
-
-        let boundary = "----WarmupBoundary"
-        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-
-        var body = Data()
-        body.append("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"warmup.png\"\r\nContent-Type: image/png\r\n\r\n".data(using: .utf8)!)
-        body.append(tinyPNG)
-        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
-        request.httpBody = body
-
-        onLog?("Sending warm-up request to trigger model download...")
-        URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
-            if let error {
-                self?.onLog?("Warm-up request failed: \(error.localizedDescription)")
-            } else if let http = response as? HTTPURLResponse {
-                self?.onLog?("Warm-up complete (HTTP \(http.statusCode))")
-            }
-        }.resume()
-    }
-
-    /// Creates a minimal valid 1x1 red PNG.
-    private func createTinyPNG() -> Data {
-        // Minimal 1x1 red PNG (67 bytes)
-        let bytes: [UInt8] = [
-            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
-            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR chunk
-            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-            0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
-            0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, // IDAT chunk
-            0x54, 0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00,
-            0x00, 0x00, 0x02, 0x00, 0x01, 0xE2, 0x21, 0xBC,
-            0x33, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, // IEND chunk
-            0x44, 0xAE, 0x42, 0x60, 0x82
-        ]
-        return Data(bytes)
-    }
 }

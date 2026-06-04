@@ -82,9 +82,10 @@ struct MenuContent: View {
             Task { await appState.runUpgrade() }
         }
 
-        Button("Reset Environment") {
+        Button("Reset Environment\(appState.venvExists ? " (\(appState.venvManager.venvSize))" : "")") {
             Task { await appState.resetVenv() }
         }
+        .disabled(!appState.venvExists)
         .disabled(!appState.venvExists || {
             switch appState.status {
             case .settingUp, .updating: return true
