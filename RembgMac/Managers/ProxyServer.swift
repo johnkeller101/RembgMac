@@ -256,15 +256,30 @@ final class ProxyServer: @unchecked Sendable {
         }
 
         // Read response from rembg and forward to client
+        // Inject "Connection: close" so the Go client doesn't try to reuse this socket
         var totalResponse = 0
+        var headerInjected = false
         while true {
             let bytesRead = recv(rembgSocket, buffer, bufferSize, 0)
             if bytesRead <= 0 { break }
-            var sent = 0
-            while sent < bytesRead {
-                let n = send(clientSocket, buffer + sent, bytesRead - sent, 0)
-                if n <= 0 { break }
-                sent += n
+
+            var dataToSend = Data(bytes: buffer, count: bytesRead)
+
+            // Inject Connection: close into the first chunk (contains HTTP headers)
+            if !headerInjected, let headerEnd = dataToSend.range(of: Data("\r\n\r\n".utf8)) {
+                let closeHeader = Data("Connection: close\r\n".utf8)
+                dataToSend.insert(contentsOf: closeHeader, at: headerEnd.lowerBound)
+                headerInjected = true
+            }
+
+            dataToSend.withUnsafeBytes { rawPtr in
+                guard let ptr = rawPtr.baseAddress else { return }
+                var sent = 0
+                while sent < dataToSend.count {
+                    let n = send(clientSocket, ptr + sent, dataToSend.count - sent, 0)
+                    if n <= 0 { break }
+                    sent += n
+                }
             }
             totalResponse += bytesRead
         }
