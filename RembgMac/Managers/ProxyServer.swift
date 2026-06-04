@@ -17,6 +17,13 @@ final class ProxyServer: @unchecked Sendable {
 
     func start() {
         stop()
+
+        queue.async { [weak self] in
+            self?.startInternal()
+        }
+    }
+
+    private func startInternal() {
         killProcessOnPort(listenPort)
 
         serverSocket = socket(AF_INET, SOCK_STREAM, 0)
@@ -56,9 +63,7 @@ final class ProxyServer: @unchecked Sendable {
         isListening = true
         onLog?("[proxy] Listening on :\(listenPort), forwarding to rembg on :\(rembgPort)")
 
-        queue.async { [weak self] in
-            self?.acceptLoop()
-        }
+        acceptLoop()
     }
 
     func stop() {
