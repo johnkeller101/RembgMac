@@ -92,7 +92,7 @@ struct MenuContent: View {
         }
 
         Toggle("Launch at Login", isOn: $launchAtLogin)
-            .onChange(of: launchAtLogin) { _, newValue in
+            .onChange(of: launchAtLogin) { newValue in
                 if newValue {
                     try? SMAppService.mainApp.register()
                 } else {

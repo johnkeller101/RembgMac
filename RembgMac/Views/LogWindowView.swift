@@ -36,7 +36,7 @@ struct LogWindowView: View {
                     }
                     .padding(8)
                 }
-                .onChange(of: appState.recentLogs.count) {
+                .onChange(of: appState.recentLogs.count) { _ in
                     if let last = appState.recentLogs.indices.last {
                         proxy.scrollTo(last, anchor: .bottom)
                     }
