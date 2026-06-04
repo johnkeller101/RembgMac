@@ -229,7 +229,14 @@ final class ProxyServer: @unchecked Sendable {
             semaphore.signal()
         }
         task.resume()
-        semaphore.wait()
+        // Wait up to 5 minutes, then cancel if still running
+        if semaphore.wait(timeout: .now() + 300) == .timedOut {
+            task.cancel()
+            let json = "{\"error\":\"rembg timed out after 5 minutes\"}"
+            responseData = Data(json.utf8)
+            responseCode = 504
+            responseContentType = "application/json"
+        }
 
         // Send response back to client
         sendResponse(clientSocket, status: responseCode, statusText: httpStatusText(responseCode), contentType: responseContentType, body: responseData, extraHeaders: "Connection: close\r\n")

@@ -137,13 +137,15 @@ final class RembgProcessManager: @unchecked Sendable {
         outputPipe?.fileHandleForReading.readabilityHandler = nil
 
         if proc.isRunning {
+            // Kill the entire process group to catch ONNX worker threads
+            kill(-pid, SIGTERM)
             proc.terminate()
-            // Wait briefly
-            for _ in 0..<10 {
+            for _ in 0..<5 {
                 if !proc.isRunning { break }
-                usleep(100_000) // 100ms, total max 1s
+                usleep(100_000)
             }
             if proc.isRunning {
+                kill(-pid, SIGKILL)
                 kill(pid, SIGKILL)
             }
         }
@@ -160,12 +162,9 @@ final class RembgProcessManager: @unchecked Sendable {
 
         if kill(pid, 0) == 0 {
             log("[cleanup] Killing stale rembg (PID \(pid)) from previous session")
-            kill(pid, SIGTERM)
-            usleep(500_000)
-            if kill(pid, 0) == 0 {
-                kill(pid, SIGKILL)
-                usleep(200_000)
-            }
+            kill(-pid, SIGKILL) // Kill process group
+            kill(pid, SIGKILL)  // Kill process directly
+            usleep(300_000)
         }
         removePidFile()
     }

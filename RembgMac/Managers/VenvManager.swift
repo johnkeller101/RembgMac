@@ -50,11 +50,20 @@ final class VenvManager {
         progress("Creating virtual environment...")
         try await runProcess(executable: systemPython, arguments: ["-m", "venv", venvDir.path])
 
-        // Install rembg
+        // Install rembg with CPU and CLI extras
         let pipPath = appSupportDir.appendingPathComponent("venv/bin/pip").path
+        progress("Upgrading pip...")
+        try await runProcess(executable: URL(fileURLWithPath: pipPath), arguments: [
+            "install", "--upgrade", "pip"
+        ])
         progress("Installing rembg (this may take a few minutes)...")
         try await runProcess(executable: URL(fileURLWithPath: pipPath), arguments: [
-            "install", "rembg[cpu,cli]"
+            "install", "--force-reinstall", "rembg[cpu,cli]"
+        ])
+        // Verify installation
+        let pythonInVenv = appSupportDir.appendingPathComponent("venv/bin/python3").path
+        try await runProcess(executable: URL(fileURLWithPath: pythonInVenv), arguments: [
+            "-c", "import rembg; print(rembg.__version__)"
         ])
 
         progress("Setup complete")
@@ -67,7 +76,7 @@ final class VenvManager {
         let pipPath = appSupportDir.appendingPathComponent("venv/bin/pip").path
         progress("Upgrading rembg...")
         try await runProcess(executable: URL(fileURLWithPath: pipPath), arguments: [
-            "install", "--upgrade", "rembg[cpu,cli]"
+            "install", "--upgrade", "--force-reinstall", "rembg[cpu,cli]"
         ])
 
         progress("Upgrade complete")
