@@ -3,6 +3,10 @@ import SwiftUI
 struct LogWindowView: View {
     @ObservedObject var appState: AppState
 
+    var logText: String {
+        appState.recentLogs.joined(separator: "\n")
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -12,6 +16,12 @@ struct LogWindowView: View {
                 Text("\(appState.recentLogs.count) lines")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Button("Copy All") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(logText, forType: .string)
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
                 Button("Clear") {
                     appState.recentLogs.removeAll()
                 }
@@ -25,21 +35,15 @@ struct LogWindowView: View {
 
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 1) {
-                        ForEach(Array(appState.recentLogs.enumerated()), id: \.offset) { idx, line in
-                            Text(line)
-                                .font(.system(.caption, design: .monospaced))
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .id(idx)
-                        }
-                    }
-                    .padding(8)
+                    Text(logText)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .id("log-bottom")
                 }
                 .onChange(of: appState.recentLogs.count) { _ in
-                    if let last = appState.recentLogs.indices.last {
-                        proxy.scrollTo(last, anchor: .bottom)
-                    }
+                    proxy.scrollTo("log-bottom", anchor: .bottom)
                 }
             }
         }

@@ -32,7 +32,7 @@ final class VenvManager {
         let pipPath = appSupportDir.appendingPathComponent("venv/bin/pip").path
         progress("Installing rembg (this may take a few minutes)...")
         try await runProcess(executable: URL(fileURLWithPath: pipPath), arguments: [
-            "install", "rembg[cli]"
+            "install", "rembg[cpu]"
         ])
 
         progress("Setup complete")
@@ -45,7 +45,7 @@ final class VenvManager {
         let pipPath = appSupportDir.appendingPathComponent("venv/bin/pip").path
         progress("Upgrading rembg...")
         try await runProcess(executable: URL(fileURLWithPath: pipPath), arguments: [
-            "install", "--upgrade", "rembg[cli]"
+            "install", "--upgrade", "rembg[cpu]"
         ])
 
         progress("Upgrade complete")
